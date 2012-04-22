@@ -1,0 +1,356 @@
+Index: prestashop/classes/ShippingModule.php
+===================================================================
+--- prestashop/classes/ShippingModule.php	(Prestashop 1.3.1)
++++ prestashop/classes/ShippingModule.php	(working copy)
+@@ -0,0 +1,201 @@
++<?php
++
++/**
++ * Author: Allan Randall
++ * Email: allan@nutrino.com.au
++ * Created: 2009-11-18
++ * Version: 0.1
++ * 
++ * File: ShippingModule.php
++ * Provides:
++ *  Manage hooks for custom shipping modules to be intergrated into Prestashop.
++ */
++ 
++class ShippingModule extends Module {
++	/* 
++	 * constants used by hook to determine shiping calculation type, 
++	 * in theory these can be ignored. 
++	 */
++	const CALC_WEIGHT     = 1;
++	const CALC_MAX_WEIGHT = 2;
++	const CALC_PRICE      = 3;
++	const CALC_MAX_PRICE  = 4;
++
++	public $delay = 'Unknown';  //text description of shipping delay
++	public $carrier_name  = 'Shipping Module';  //readable description
++
++	public static function getModuleId($id_carrier) {
++		$db_prefix = _DB_PREFIX_;
++		$select_id_module = <<<EOQ
++SELECT 
++    `id_module`
++FROM 
++    `${db_prefix}module_carrier`
++WHERE 
++    id_carrier = ${id_carrier}
++EOQ;
++		$result = Db::getInstance()->ExecuteS($select_id_module);
++		
++		// Just assume only one result, bad I know! But should be safe.
++		return empty($result[0]['id_module']) ? NULL : $result[0]['id_module'];
++	}
++
++	public static function getCarrierIds($id_module) {
++		/*
++		 * Carriers are never deleted which is why we must return an array 
++		 * of all Carriers associated with this module
++		 */
++		$db_prefix = _DB_PREFIX_;
++		$id_module = intval($id_module);
++		$select_id_carrier = <<<EOQ
++SELECT 
++    `id_carrier`
++FROM 
++    `${db_prefix}module_carrier`
++WHERE 
++    id_module = ${id_module}
++EOQ;
++		$db_result = Db::getInstance()->ExecuteS($select_id_carrier);
++		
++		$result = array();
++		foreach ($db_result as $row) {
++			$result[] = $row['id_carrier'];
++		}
++		
++		return $result;
++	}
++
++	public function install($create_carrier = TRUE) {
++		if (
++			!parent::install()
++			OR !$this->registerHook('updateCarrier')
++		) {
++			return false;
++		}
++		if ($create_carrier) {
++			return $this->addCarrier($this->carrier_name, $this->delay);
++		}
++		return true;
++	}
++
++	public function addCarrier($name, $params) {
++		$carrier = new Carrier();
++
++		// set delay depending on wither a string or array was passed.
++		$default_language = intval(Configuration::get('PS_LANG_DEFAULT'));
++		$delay = @$params['delay'];
++		if (!is_array($delay)) {
++			$delay_lang_array = Array();
++			
++			$delay = (empty($delay)) ? '-' : $delay;
++			
++			foreach (Language::getLanguages() as $language) {
++				// Just use same delay for all langs
++				$delay_lang_array[$language['id_lang']] = $delay;
++			}
++			
++			$delay = $delay_lang_array;
++		}
++		
++		$id_tax = @Tax::getTaxIdByRate($params['tax_rate']);
++		if ($id_tax === FALSE) { $id_tax = 0; }
++		
++		$carrier_defaults = Array(
++			'active'            => true,
++			'deleted'           => 0,
++			'is_module'         => true,
++			'delay'             => $delay,
++			'name'              => $name,
++			'id_tax'			=> $id_tax,
++		);
++		
++		foreach($carrier_defaults as $key => $value) {
++			$carrier->$key = $value;
++		}
++		
++		$carrier->add();
++		$this->insertCarrierMap($carrier->id);
++		
++		$zones = Array();
++		
++		// Try to add automatically to country
++		if (isset($params['iso_include']) OR isset($params['iso_exclude'])) {
++			// condition arrays 
++			//TODO: Make a little cleaner.
++			$iso_include = (is_array($params['iso_include'])) ? 
++				$params['iso_include'] : array($params['iso_include']);
++			if (empty($params['iso_include'])) { $iso_include = NULL; }
++			
++			$iso_exclude = (is_array($params['iso_exclude'])) ?
++				$params['iso_exclude'] : array($params['iso_exclude']);
++			if (empty($params['iso_exclude'])) { $iso_exclude = NULL; }
++						
++			foreach (Country::getCountries($default_language) as $country) {
++				if (!key_exists($country['id_zone'], $zones)) {
++					$zones[$country['id_zone']] = FALSE;
++				}
++				
++				if (
++					@in_array($country['iso_code'], $iso_include)
++					OR (
++						empty($iso_include)
++						AND !in_array($country['iso_code'], $iso_exclude)
++					)
++				) {
++					$zones[$country['id_zone']] = TRUE;
++				}
++			}
++		}
++		foreach ($zones as $id_zone => $enabled) {
++			if ($enabled) {
++				$carrier->addZone($id_zone);
++			} else {
++				$carrier->deleteZone($id_zone);
++			}
++		}
++	
++		return $carrier->id;
++	}
++
++	public function uninstall() {
++		// As Carriers never get deleted we leave the mapping in the database
++		
++		// Flag Carriers asociated with this module as deleted.
++		foreach ($this->getCarrierIds($this->id) as $id_carrier) {
++			$this->deleteCarrier($id_carrier);
++		}
++		return parent::uninstall();
++	}
++
++	public function deleteCarrier($id_carrier) {
++		$carrier = new Carrier($id_carrier);
++		$carrier->deleted = 1;
++		return $carrier->update();
++	}
++
++	public function hookUpdateCarrier($params) {
++		/* @params array('id_carrier' => $id_carrier, 'carrier' => $carrier) */
++		
++		// if the update is not for this module then ignore
++		if (!in_array($params['id_carrier'], $this->getCarrierIds($this->id))) {
++			return true;
++		}
++		
++		return $this->insertCarrierMap($params['carrier']->id);
++	}
++
++	protected function insertCarrierMap($id_carrier) {
++		// Function to add map between id_module and id_carrier
++		$db_prefix = _DB_PREFIX_;
++		$id_module = $this->id;
++		$sql = <<<EOQ
++INSERT INTO 
++    ${db_prefix}module_carrier
++VALUES 
++    (${id_module}, ${id_carrier})
++EOQ;
++		
++		return Db::getInstance()->Execute($sql);
++	}
++}
++?>
+Index: prestashop/classes/Hook.php
+===================================================================
+--- prestashop/classes/Hook.php	(Prestashop 1.3.1)
++++ prestashop/classes/Hook.php	(working copy)
+@@ -134,6 +134,22 @@
+ 		return Module::hookExec('deleteProduct', array('product' => $product));
+ 	}
+ 	
++	static public function calculateShipping($id_carrier, $id_zone, $calc_type, $value) 
++	{
++		$result = Module::hookExec(
++			'calculateShipping', 
++			array(
++				'id_carrier' => $id_carrier,
++				'id_zone'    => $id_zone,
++				'calc_type'  => $calc_type,
++				'value'      => $value,
++			), 
++			ShippingModule::getModuleId($id_carrier)
++		);
++		
++		return ($result == '') ? false : $result;
++	}
++	
+ 	static public function updateProductAttribute($id_product_attribute)
+ 	{
+ 		return Module::hookExec('updateProductAttribute', array('id_product_attribute' => $id_product_attribute));
+Index: prestashop/classes/Carrier.php
+===================================================================
+--- prestashop/classes/Carrier.php	(Prestashop 1.3.1)
++++ prestashop/classes/Carrier.php	(working copy)
+@@ -118,6 +118,14 @@
+ 	 */
+ 	public function getDeliveryPriceByWeight($totalWeight, $id_zone)
+ 	{
++		if ($this->is_module) {
++			return Hook::calculateShipping(
++				intval($this->id), // id_carrier
++				$id_zone,
++				ShippingModule::CALC_WEIGHT, //calc_type
++				$totalWeight //value (Weight)
++			);
++		}
+ 		if (isset(self::$priceByWeight[$this->id]))
+ 			return self::$priceByWeight[$this->id];
+ 		$result = Db::getInstance()->getRow('
+@@ -136,6 +144,18 @@
+ 
+ 	static public function checkDeliveryPriceByWeight($id_carrier, $totalWeight, $id_zone)
+ 	{
++		$carrier = new Carrier($id_carrier);
++		if ($carrier->is_module) {
++			$price = Hook::calculateShipping(
++					intval($carrier->id), //id_carrier
++					$id_zone,
++					ShippingModule::CALC_WEIGHT, //calc_type
++					$totalWeight //value (Weight)
++				);
++			if (!isset($price)) { return false; }
++			return true;
++		}
++        
+ 		$result = Db::getInstance()->getRow('
+ 		SELECT d.`price`
+ 		FROM `'._DB_PREFIX_.'delivery` d
+@@ -152,6 +171,14 @@
+ 
+ 	public function getMaxDeliveryPriceByWeight($id_zone)
+ 	{
++		if ($this->is_module) {
++			return Hook::calculateShipping(
++				intval($this->id), // id_carrier
++				$id_zone,
++				ShippingModule::CALC_MAX_WEIGHT, //calc_type
++				NULL //value (Weight)
++			);
++		}
+ 		$result = Db::getInstance()->ExecuteS('
+ 		SELECT d.`price`
+ 		FROM `'._DB_PREFIX_.'delivery` d
+@@ -173,6 +200,14 @@
+ 	 */
+ 	public function getDeliveryPriceByPrice($orderTotal, $id_zone)
+ 	{
++		if ($this->is_module) {
++			return Hook::calculateShipping(
++				intval($this->id), // id_carrier
++				$id_zone,
++				ShippingModule::CALC_PRICE, //calc_type
++				$orderTotal //value (Price)
++			);
++		}
+ 
+ 		if (isset(self::$priceByPrice[$this->id]))
+ 			return self::$priceByPrice[$this->id];
+@@ -192,6 +227,18 @@
+ 
+ 	static public function checkDeliveryPriceByPrice($id_carrier, $orderTotal, $id_zone)
+ 	{
++		$carrier = new Carrier($id_carrier);
++		if ($carrier->is_module) {
++			$price = Hook::calculateShipping(
++					intval($carrier->id), // id_carrier
++					$id_zone,
++					ShippingModule::CALC_PRICE, //calc_type
++					$orderTotal //value (Price)
++				);
++			if (!isset($price)) { return false; }
++			return true;
++		}
++        
+ 		$result = Db::getInstance()->getRow('
+ 		SELECT d.`price`
+ 		FROM `'._DB_PREFIX_.'delivery` d
+@@ -208,6 +254,14 @@
+ 
+ 	public function getMaxDeliveryPriceByPrice($id_zone)
+ 	{
++		if ($this->is_module) {
++			return Hook::calculateShipping(
++				intval($this->id), // id_carrier
++				$id_zone, 
++				ShippingModule::CALC_MAX_PRICE, //calc_type
++				NULL //value
++			);
++		}
+ 		$result = Db::getInstance()->ExecuteS('
+ 		SELECT d.`price`
+ 		FROM `'._DB_PREFIX_.'delivery` d
+@@ -267,7 +321,6 @@
+ 			($active ? ' AND c.`active` = 1' : '').
+ 			($id_zone ? ' AND cz.`id_zone` = '.intval($id_zone).'
+ 			AND z.`active` = 1' : '').'
+-			AND c.`is_module` = 0
+ 		    '.($ids_group ? 'AND c.id_carrier IN (SELECT id_carrier FROM '._DB_PREFIX_.'carrier_group WHERE id_group IN ('.$ids.')) ' : '').'
+ 			GROUP BY c.`id_carrier`';
+ 		$carriers = Db::getInstance()->ExecuteS($sql);
+Index: prestashop/order.php
+===================================================================
+--- prestashop/order.php	(Prestashop 1.3.1)
++++ prestashop/order.php	(working copy)
+@@ -340,7 +340,7 @@
+ 		}
+ 		
+ 		// If out-of-range behavior carrier is set on "Desactivate carrier"
+-		if ($row['range_behavior'])
++		if ($row['range_behavior'] and !$row['is_module'])
+ 		{
+ 			// Get id zone
+ 	        if (isset($cart->id_address_delivery) AND $cart->id_address_delivery)

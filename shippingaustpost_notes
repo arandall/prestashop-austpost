@@ -1,0 +1,27 @@
+-------------------------------------
+Australia Post Shipping Module - v0.1
+-------------------------------------
+Author: Allan Randall
+Email:  allan@nutrino.com.au
+
+This is an Australia Post module that adds the following carriers: 
+ 	- Australia Post (Standard)
+	- Australia Post (Express)
+	- Australia Post (Air)
+	- Australia Post (Sea)
+
+Those who are familiar with Australia Post know that the estimated delivery 
+time is also returned by the API. I have not bothered attempting to add this 
+functionality using a hook into the 'ShippingModule' due to the way the delay 
+is statically implemented in Prestashop.
+
+To install this module:
+1. Copy the 'shippingaustpost' directory to your Prestashop modules directory 
+   and install it like you would any other Prestashop module.
+2. Click configure to add/remove carriers not required.
+3. Ensure your store address details contain the right country and postcode.
+4. Go to your carriers tab and you should now see the 'Shipping Module 
+   Example' carrier listed. Edit the carrier and add it to the correct zones 
+   and give appropriate group access.
+5. You are now ready to go. Prestashop will give you the Australia Post 
+   carriers when you are making an order.
